@@ -11,11 +11,11 @@ extern "C" {
 #include "py/mphal.h"
 
 // color modes
-#define COLOR_MODE_65K      0x50
-#define COLOR_MODE_262K     0x60
-#define COLOR_MODE_12BIT    0x03
-#define COLOR_MODE_16BIT    0x05
-#define COLOR_MODE_18BIT    0x06
+#define COLOR_MODE_65K      0x55
+#define COLOR_MODE_262K     0x66
+#define COLOR_MODE_12BIT    0x33
+#define COLOR_MODE_16BIT    0x55
+#define COLOR_MODE_18BIT    0x66
 #define COLOR_MODE_16M      0x07
 
 // commands
