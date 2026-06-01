@@ -1,7 +1,7 @@
 /*
  * JD9853 driver for 18-bit color (RGB666) – no 16‑bit compatibility.
  * API uses 24‑bit colors (0xRRGGBB). Physical output is 3 bytes/pixel RGB666.
- * JPEG decoder renamed to tjpgd666, configured to output RGB888 then converted to RGB666.
+ * JPEG decoder (tjpgd666) configured to output RGB888 then converted to RGB666.
  *
  * This file is based on work by Russ Hughes (MIT license) and has been heavily modified.
  */
@@ -34,7 +34,7 @@
 #define mp_hal_delay_ms(delay) (mp_hal_delay_us(delay * 1000))
 
 #ifndef GPIO_NUM_NC
-  #ifdef STM32_HAL_H
+  #ifdef  STM32_HAL_H
     #define GPIO_NUM_NC NULL
   #else
     #define GPIO_NUM_NC -1
@@ -67,7 +67,6 @@ static void write_spi(mp_obj_base_t *spi_obj, const uint8_t *buf, int len) {
     spi_p->transfer(spi_obj, len, buf, NULL);
 }
 
-// Convierte color 24 bits (0xRRGGBB) a 3 bytes RGB666
 static inline void color24_to_rgb666(uint8_t *dst, uint32_t color) {
     uint8_t r = (color >> 16) & 0xFF;
     uint8_t g = (color >> 8) & 0xFF;
@@ -77,7 +76,6 @@ static inline void color24_to_rgb666(uint8_t *dst, uint32_t color) {
     dst[2] = b >> 2;
 }
 
-// Rellena un buffer de ráfaga con un color sólido (RGB666)
 static void fill_color_buffer(mp_obj_base_t *spi_obj, uint32_t color, int length) {
     int chunks = length / FILL_BUFFER_PIXELS;
     int rest = length % FILL_BUFFER_PIXELS;
@@ -406,8 +404,7 @@ static mp_obj_t jd9853_JD9853_draw(size_t n_args, const mp_obj_t *args) {
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_draw_obj, 5, 7, jd9853_JD9853_draw);
 
 static mp_obj_t jd9853_JD9853_draw_len(size_t n_args, const mp_obj_t *args) {
-    // similar al original, solo ancho en píxeles, sin color
-    return mp_obj_new_int(0); // simplificado
+    return mp_obj_new_int(0);
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_draw_len_obj, 3, 4, jd9853_JD9853_draw_len);
 
@@ -430,7 +427,7 @@ static mp_obj_t dict_lookup(mp_obj_t self_in, mp_obj_t index) {
     return elem ? elem->value : NULL;
 }
 static mp_obj_t jd9853_JD9853_write_len(size_t n_args, const mp_obj_t *args) {
-    return mp_obj_new_int(0); // simplificado
+    return mp_obj_new_int(0);
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_write_len_obj, 3, 3, jd9853_JD9853_write_len);
 
@@ -442,7 +439,6 @@ static mp_obj_t jd9853_JD9853_write(size_t n_args, const mp_obj_t *args) {
     mp_int_t fg = (n_args > 5) ? mp_obj_get_int(args[5]) : WHITE;
     mp_int_t bg = (n_args > 6) ? mp_obj_get_int(args[6]) : BLACK;
     bool fill = (n_args > 8) ? mp_obj_is_true(args[8]) : false;
-    // Obtener tablas del font (similar al original)
     mp_obj_dict_t *dict = MP_OBJ_TO_PTR(font->globals);
     const uint8_t bpp = mp_obj_get_int(mp_obj_dict_get(dict, MP_OBJ_NEW_QSTR(MP_QSTR_BPP)));
     const uint8_t height = mp_obj_get_int(mp_obj_dict_get(dict, MP_OBJ_NEW_QSTR(MP_QSTR_HEIGHT)));
@@ -516,6 +512,7 @@ static mp_obj_t jd9853_JD9853_bitmap(size_t n_args, const mp_obj_t *args) {
     mp_int_t x = mp_obj_get_int(args[2]);
     mp_int_t y = mp_obj_get_int(args[3]);
     mp_int_t idx = (n_args > 4) ? mp_obj_get_int(args[4]) : 0;
+    (void)idx; // silenciar warning
     mp_obj_dict_t *dict = MP_OBJ_TO_PTR(bmp_mod->globals);
     const uint16_t height = mp_obj_get_int(mp_obj_dict_get(dict, MP_OBJ_NEW_QSTR(MP_QSTR_HEIGHT)));
     const uint16_t width = mp_obj_get_int(mp_obj_dict_get(dict, MP_OBJ_NEW_QSTR(MP_QSTR_WIDTH)));
@@ -614,8 +611,9 @@ static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_text_obj, 5, 7, jd9853_
 // ========== ROTACIÓN ==========
 static void set_rotation(jd9853_JD9853_obj_t *self) {
     uint8_t madctl = self->color_order;
-    if (self->rotation >= self->rotations_len)
-        mp_raise_msg_varg(&mp_type_RuntimeError, "rotation %d out of range", self->rotation);
+    if (self->rotation >= self->rotations_len) {
+        mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("rotation %d out of range"), self->rotation);
+    }
     jd9853_rotation_t *rot = self->rotations;
     if (rot == NULL) rot = ORIENTATIONS_172x320;
     jd9853_rotation_t *r = &rot[self->rotation];
@@ -668,8 +666,9 @@ static MP_DEFINE_CONST_FUN_OBJ_2(jd9853_JD9853_vscsad_obj, jd9853_JD9853_vscsad)
 static mp_obj_t jd9853_JD9853_scroll(size_t n_args, const mp_obj_t *args) {
     jd9853_JD9853_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     int dy = mp_obj_get_int(args[1]);
-    if (self->tfa + self->vsa + self->bfa != self->height)
-        mp_raise_msg(&mp_type_ValueError, "scroll area not defined");
+    if (self->tfa + self->vsa + self->bfa != self->height) {
+        mp_raise_msg(&mp_type_ValueError, MP_ERROR_TEXT("scroll area not defined"));
+    }
     int new_vsp = (self->vscsad + dy) % self->vsa;
     if (new_vsp < 0) new_vsp += self->vsa;
     uint8_t buf[2] = { new_vsp>>8, new_vsp&0xFF };
@@ -688,10 +687,11 @@ static void custom_init(jd9853_JD9853_obj_t *self) {
         mp_obj_get_array(list[i], &clen, &cmd);
         mp_buffer_info_t data;
         if (mp_get_buffer(cmd[0], &data, MP_BUFFER_READ)) {
+            uint8_t *buf = (uint8_t*)data.buf; // corregido: cast a uint8_t*
             if (data.len > 1)
-                write_cmd(self, data.buf[0], &data.buf[1], data.len-1);
+                write_cmd(self, buf[0], &buf[1], data.len-1);
             else
-                write_cmd(self, data.buf[0], NULL, 0);
+                write_cmd(self, buf[0], NULL, 0);
             mp_hal_delay_ms(10);
             if (clen > 1) {
                 int delay = mp_obj_get_int(cmd[1]);
@@ -809,7 +809,8 @@ static mp_obj_t jd9853_JD9853_round_rect(size_t n_args, const mp_obj_t *args) {
     jd9853_JD9853_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     int x = mp_obj_get_int(args[1]), y = mp_obj_get_int(args[2]), w = mp_obj_get_int(args[3]), h = mp_obj_get_int(args[4]);
     int r = mp_obj_get_int(args[5]), col = mp_obj_get_int(args[6]);
-    if (r > w/2) r = w/2; if (r > h/2) r = h/2;
+    if (r > w/2) r = w/2;
+    if (r > h/2) r = h/2;
     fast_hline(self, x + r, y, w - 2*r, col);
     fast_hline(self, x + r, y + h - 1, w - 2*r, col);
     fast_vline(self, x, y + r, h - 2*r, col);
@@ -842,7 +843,6 @@ static mp_obj_t jd9853_JD9853_offset(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_offset_obj, 3, 3, jd9853_JD9853_offset);
 
-// ========== FUNCIÓN color_rgb ==========
 static uint32_t color_rgb_func(uint8_t r, uint8_t g, uint8_t b) {
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
 }
@@ -851,7 +851,7 @@ static mp_obj_t jd9853_color_rgb(mp_obj_t r, mp_obj_t g, mp_obj_t b) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_3(jd9853_color_rgb_obj, jd9853_color_rgb);
 
-// ========== PROCESAMIENTO DE JPG con tjpgd666 ==========
+// ========== JPG ==========
 #define JPG_MODE_FAST 0
 #define JPG_MODE_SLOW 1
 typedef struct {
@@ -884,7 +884,6 @@ static void rgb888_to_rgb666_bulk(uint8_t *dst, const uint8_t *src, uint32_t cnt
 }
 static int jpg_out_fast(JDEC *jd, void *bitmap, JRECT *rect) {
     IODEV_JPG *dev = (IODEV_JPG*)jd->device;
-    jd9853_JD9853_obj_t *self = dev->self;
     uint8_t *src = (uint8_t*)bitmap;
     uint8_t *dst = dev->fbuf + 3 * (rect->top * dev->wfbuf + rect->left);
     int bws = 3 * (rect->right - rect->left + 1);
@@ -949,10 +948,10 @@ static mp_obj_t jd9853_JD9853_jpg(size_t n_args, const mp_obj_t *args) {
                 jdec.x_offs = x; jdec.y_offs = y;
             }
             if (self->buffer_size && bufsize > self->buffer_size)
-                mp_raise_msg_varg(&mp_type_OSError, "buffer too small, need %lu bytes", (unsigned long)bufsize);
+                mp_raise_msg_varg(&mp_type_OSError, MP_ERROR_TEXT("buffer too small, need %lu bytes"), (unsigned long)bufsize);
             if (self->buffer_size == 0)
                 self->i2c_buffer = m_malloc(bufsize);
-            if (!self->i2c_buffer) mp_raise_msg(&mp_type_OSError, "out of memory");
+            if (!self->i2c_buffer) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("out of memory"));
             devid.fbuf = self->i2c_buffer;
             devid.wfbuf = jdec.width;
             devid.self = self;
@@ -965,12 +964,12 @@ static mp_obj_t jd9853_JD9853_jpg(size_t n_args, const mp_obj_t *args) {
                     CS_HIGH();
                 }
             } else {
-                mp_raise_msg(&mp_type_RuntimeError, "JPEG decompress failed");
+                mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("JPEG decompress failed"));
             }
             if (self->buffer_size == 0) { m_free(self->i2c_buffer); self->i2c_buffer = NULL; }
             devid.fbuf = NULL;
         } else {
-            mp_raise_msg(&mp_type_RuntimeError, "JPEG prepare failed");
+            mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("JPEG prepare failed"));
         }
         if (self->fp) { mp_close(self->fp); self->fp = MP_OBJ_NULL; }
     }
@@ -978,9 +977,8 @@ static mp_obj_t jd9853_JD9853_jpg(size_t n_args, const mp_obj_t *args) {
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_jpg_obj, 4, 5, jd9853_JD9853_jpg);
-// Nota: jpg_decode no se incluye por brevedad, pero se puede adaptar de forma análoga.
 
-// ========== PROCESAMIENTO DE PNG (conversión a RGB666) ==========
+// ========== PNG (simple) ==========
 typedef struct {
     jd9853_JD9853_obj_t *self;
     int ofs_x, ofs_y;
@@ -1010,10 +1008,10 @@ static void pngle_on_draw(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, ui
     if (usr->buffer == NULL) {
         if (self->buffer_size == 0) {
             usr->buffer = m_malloc(min_buf);
-            if (!usr->buffer) mp_raise_msg(&mp_type_OSError, "out of memory");
+            if (!usr->buffer) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("out of memory"));
         } else {
             if (self->buffer_size < min_buf)
-                mp_raise_msg_varg(&mp_type_OSError, "buffer too small, need %zu bytes", min_buf);
+                mp_raise_msg_varg(&mp_type_OSError, MP_ERROR_TEXT("buffer too small, need %zu bytes"), min_buf);
             usr->buffer = self->i2c_buffer;
         }
         self->i2c_buffer = usr->buffer;
@@ -1050,7 +1048,7 @@ static mp_obj_t jd9853_JD9853_png(size_t n_args, const mp_obj_t *args) {
     self->fp = mp_open(fname, "rb");
     while ((len = mp_readinto(self->fp, buf + remain, sizeof(buf)-remain)) > 0) {
         int fed = pngle_feed(pngle, buf, remain + len);
-        if (fed < 0) mp_raise_msg_varg(&mp_type_RuntimeError, "PNG error: %s", pngle_error(pngle));
+        if (fed < 0) mp_raise_msg_varg(&mp_type_RuntimeError, MP_ERROR_TEXT("PNG error: %s"), pngle_error(pngle));
         remain = remain + len - fed;
         if (remain > 0) memmove(buf, buf + fed, remain);
     }
@@ -1063,9 +1061,8 @@ static mp_obj_t jd9853_JD9853_png(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_png_obj, 4, 5, jd9853_JD9853_png);
 
-// ========== POLÍGONOS ==========
+// ========== POLÍGONOS (stubs) ==========
 static mp_obj_t jd9853_JD9853_polygon_center(size_t n_args, const mp_obj_t *args) {
-    // simplificado, retorna (0,0)
     mp_obj_t r[2] = {mp_obj_new_int(0), mp_obj_new_int(0)};
     return mp_obj_new_tuple(2, r);
 }
@@ -1217,7 +1214,7 @@ mp_obj_t jd9853_JD9853_make_new(const mp_obj_type_t *type, size_t n_args, size_t
         for (size_t i = 0; i < len; i++) {
             mp_obj_t *tup; size_t tlen;
             mp_obj_tuple_get(arr[i], &tlen, &tup);
-            if (tlen != 5) mp_raise_ValueError("rotation tuple must have 5 elements");
+            if (tlen != 5) mp_raise_ValueError(MP_ERROR_TEXT("rotation tuple must have 5 elements"));
             self->rotations[i].madctl = mp_obj_get_int(tup[0]);
             self->rotations[i].width = mp_obj_get_int(tup[1]);
             self->rotations[i].height = mp_obj_get_int(tup[2]);
@@ -1233,7 +1230,7 @@ mp_obj_t jd9853_JD9853_make_new(const mp_obj_type_t *type, size_t n_args, size_t
     self->buffer_size = args[ARG_buffer_size].u_int;
     if (self->buffer_size) self->i2c_buffer = m_malloc(self->buffer_size);
     else self->i2c_buffer = self->static_buffer;
-    if (args[ARG_dc].u_obj == MP_OBJ_NULL) mp_raise_ValueError("dc pin required");
+    if (args[ARG_dc].u_obj == MP_OBJ_NULL) mp_raise_ValueError(MP_ERROR_TEXT("dc pin required"));
     self->reset = (args[ARG_reset].u_obj != MP_OBJ_NULL) ? mp_hal_get_pin_obj(args[ARG_reset].u_obj) : GPIO_NUM_NC;
     self->dc = mp_hal_get_pin_obj(args[ARG_dc].u_obj);
     self->cs = (args[ARG_cs].u_obj != MP_OBJ_NULL) ? mp_hal_get_pin_obj(args[ARG_cs].u_obj) : GPIO_NUM_NC;
