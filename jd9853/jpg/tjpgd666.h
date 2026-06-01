@@ -8,7 +8,7 @@
 /* System Configurations */
 
 #define	JD_SZBUF		512		/* Size of stream input buffer */
-#define JD_FORMAT		0		/* 0: RGB888 (3 bytes/pixel), 1: RGB565 (2 bytes/pixel) */
+#define JD_FORMAT		0		/* 0: RGB888 (3 bytes/pixel), 1: RGB666 (2 bytes/pixel) */
 #define	JD_USE_SCALE	1		/* Use descaling feature for output */
 #define JD_TBLCLIP		1		/* Use table for saturation */
 
