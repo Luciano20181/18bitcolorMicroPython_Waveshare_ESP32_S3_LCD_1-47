@@ -93,6 +93,15 @@ static void write_spi(mp_obj_base_t *spi_obj, const uint8_t *buf, int len) {
     spi_p->transfer(spi_obj, len, buf, NULL);
 }
 
+static inline void rgb888_to_rgb666(uint8_t *dst, const uint8_t *src, uint32_t pixel_count) {
+    for (uint32_t i = 0; i < pixel_count; i++) {
+        *dst++ = src[0] >> 2;   // R (6 bits)
+        *dst++ = src[1] >> 2;   // G
+        *dst++ = src[2] >> 2;   // B
+        src += 3;
+    }
+}
+
 static void jd9853_JD9853_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
     (void)kind;
     jd9853_JD9853_obj_t *self = MP_OBJ_TO_PTR(self_in);
@@ -1250,33 +1259,42 @@ static unsigned int file_in_func(JDEC *jd, uint8_t *buff, unsigned int nbyte) {
 }
 static int out_fast(JDEC *jd, void *bitmap, JRECT *rect) {
     IODEV *dev = (IODEV *)jd->device;
-    uint8_t *src = (uint8_t*)bitmap;
-    uint8_t *dst = dev->fbuf + 2 * (rect->top * dev->wfbuf + rect->left);
-    int bws = 2 * (rect->right - rect->left + 1);
-    int bwd = 2 * dev->wfbuf;
+    jd9853_JD9853_obj_t *self = dev->self;
+    uint8_t *src = (uint8_t*)bitmap;   // RGB888 de entrada
+    // Calcular offset en buffer destino (dev->fbuf) en base a bytes por píxel (3)
+    uint8_t *dst = dev->fbuf + 3 * (rect->top * dev->wfbuf + rect->left);
+    int bws = 3 * (rect->right - rect->left + 1);   // bytes por línea de la fuente (RGB888)
+    int bwd = 3 * dev->wfbuf;                       // bytes por línea del buffer destino (RGB666)
     for (unsigned int y = rect->top; y <= rect->bottom; y++) {
-        memcpy(dst, src, bws);
+        // Convertir la línea completa de RGB888 a RGB666 y copiar
+        rgb888_to_rgb666(dst, src, (rect->right - rect->left + 1));
         src += bws;
         dst += bwd;
     }
     return 1;
 }
+
 static int out_slow(JDEC *jd, void *bitmap, JRECT *rect) {
     IODEV *dev = (IODEV *)jd->device;
     jd9853_JD9853_obj_t *self = dev->self;
     uint8_t *src = (uint8_t*)bitmap;
+    // En modo lento, dev->fbuf es un buffer temporal para una sola fila (o bloque) convertido
+    // Pero en la implementación original, se copia toda la imagen dentro del buffer y luego se envía.
+    // Aquí también hay que convertir.
+    // Asumimos que dev->fbuf tiene suficiente espacio para toda la porción (en RGB666)
     uint8_t *dst = dev->fbuf;
-    int wx2 = (rect->right - rect->left + 1) * 2;
-    int h = rect->bottom - rect->top + 1;
-    for (unsigned int y = rect->top; y <= rect->bottom; y++) {
-        memcpy(dst, src, wx2);
-        src += wx2;
-        dst += wx2;
+    int width_pixels = rect->right - rect->left + 1;
+    int height_pixels = rect->bottom - rect->top + 1;
+    int wx3 = width_pixels * 3;   // bytes por línea en RGB666
+    for (unsigned int y = 0; y < height_pixels; y++) {
+        rgb888_to_rgb666(dst, src, width_pixels);
+        src += wx3;   // la fuente ya está en RGB888, misma cantidad de bytes (3 por píxel)
+        dst += wx3;
     }
     set_window(self, rect->left + jd->x_offs, rect->top + jd->y_offs,
                rect->right + jd->x_offs, rect->bottom + jd->y_offs);
     DC_HIGH(); CS_LOW();
-    write_spi(self->spi_obj, (uint8_t *)dev->fbuf, wx2 * h);
+    write_spi(self->spi_obj, (uint8_t *)dev->fbuf, wx3 * height_pixels);
     CS_HIGH();
     return 1;
 }
@@ -1307,10 +1325,10 @@ static mp_obj_t jd9853_JD9853_jpg(size_t n_args, const mp_obj_t *args) {
             size_t bufsize;
             int (*outfunc)(JDEC*,void*,JRECT*);
             if (mode == JPG_MODE_FAST) {
-                bufsize = 2 * jdec.width * jdec.height;
+                bufsize = 3 * jdec.width * jdec.height;   // Cambiado: 3 bytes por píxel (RGB666)
                 outfunc = out_fast;
             } else {
-                bufsize = 2 * jdec.msx * 8 * jdec.msy * 8;
+                bufsize = 3 * jdec.msx * 8 * jdec.msy * 8; // Cambiado: 3 bytes por píxel
                 outfunc = out_slow;
                 jdec.x_offs = x; jdec.y_offs = y;
             }
