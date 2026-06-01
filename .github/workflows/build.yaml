@@ -1,4 +1,4 @@
-name: MicroPython with JD9853 for Waveshare ESP32-S3 LCD 1.47 Touch
+name: MicroPython with JD9853 for Waveshare ESP32-S3 LCD 1.47 Touch 18 bit
 
 permissions:
   contents: write
