@@ -20,7 +20,7 @@
 / Jul 01, 2020 R0.01d Fixed wrong integer type usage.
 /----------------------------------------------------------------------------*/
 
-#include "tjpgd565.h"
+#include "tjpgd666.h"
 
 
 /*-----------------------------------------------*/
@@ -669,7 +669,7 @@ static JRESULT mcu_output (
 		}
 	}
 
-	/* Convert RGB888 to RGB565 if needed */
+	/* Convert RGB888 to RGB666 if needed */
 	if (JD_FORMAT == 1) {
 		uint8_t *s = (uint8_t*)jd->workbuf;
 		uint16_t w, *d = (uint16_t*)s;
