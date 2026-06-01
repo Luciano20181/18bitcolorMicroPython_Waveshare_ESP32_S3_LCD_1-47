@@ -62,9 +62,9 @@ extern "C" {
 #define MAGENTA 0xFF00FF
 #define YELLOW  0xFFFF00
 #define WHITE   0xFFFFFF
-#define ORANGE  0xFFA500
+#define ORANGE  0xFFC95B0
 #define PURPLE  0x800080
-#define PINK    0xFFC0CB
+#define PINK    0xFFCCFF
 #define GRAY    0x808080
 #define DARKGRAY 0x404040
 #define BROWN   0xA52A2A
