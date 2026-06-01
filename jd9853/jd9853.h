@@ -5,6 +5,11 @@
 extern "C" {
 #endif
 
+#include <stdint.h>
+#include <stdbool.h>
+#include "py/obj.h"
+#include "py/mphal.h"
+
 // color modes
 #define COLOR_MODE_65K      0x50
 #define COLOR_MODE_262K     0x60
@@ -37,7 +42,7 @@ extern "C" {
 #define JD9853_VSCRDEF 0x33
 #define JD9853_COLMOD  0x3A
 #define JD9853_MADCTL  0x36
-#define JD9853_VSCSAD  0x37
+#define JD9853_VSCRSADD 0x37   // nota: en el .c se usa JD9853_VSCRSADD (sin 'S' en medio? se define como 0x37)
 
 #define JD9853_MADCTL_MY  0x80  // Page Address Order
 #define JD9853_MADCTL_MX  0x40  // Column Address Order
@@ -102,6 +107,14 @@ typedef struct _jd9853_JD9853_obj_t {
     uint16_t *i2c_buffer;       // resident buffer if buffer_size given
     uint16_t vscsad;            // vertical scroll start address (for scroll)
     uint16_t hscsad;            // horizontal scroll position (for horizontal scroll)
+
+    // ========== CAMPOS AÑADIDOS PARA SCROLL VERTICAL Y BUFFER ESTÁTICO ==========
+    uint16_t tfa;               // Top Fixed Area (de VSCRDEF)
+    uint16_t vsa;               // Vertical Scrolling Area (de VSCRDEF)
+    uint16_t bfa;               // Bottom Fixed Area (de VSCRDEF)
+    uint8_t static_buffer[4096]; // buffer interno estático (evita malloc en write/text/bitmap)
+    // ===========================================================================
+
     // m_malloc'd pointers
     void *work;                 // work buffer for jpg & png decoding
     uint8_t *scanline_ringbuf;  // png scanline_ringbuf
@@ -109,7 +122,7 @@ typedef struct _jd9853_JD9853_obj_t {
     uint8_t *trans_palette;     // png trans_palette
     uint8_t *gamma_table;       // png gamma_table
 
-    size_t buffer_size;         // resident buffer size, 0=dynamic
+    size_t buffer_size;         // resident buffer size, 0=dynamic (usa static_buffer)
     uint16_t display_width;     // physical width
     uint16_t width;             // logical width (after rotation)
     uint16_t display_height;    // physical height
@@ -137,13 +150,13 @@ typedef struct _jd9853_JD9853_obj_t {
 
 } jd9853_JD9853_obj_t;
 
+// Constructor
 mp_obj_t jd9853_JD9853_make_new(const mp_obj_type_t *type, size_t n_args, size_t n_kw, const mp_obj_t *args);
 
+// Funciones de dibujo (exportadas para uso interno)
 extern void draw_pixel(jd9853_JD9853_obj_t *self, int16_t x, int16_t y, uint16_t color);
 extern void fast_hline(jd9853_JD9853_obj_t *self, int16_t x, int16_t y, int16_t w, uint16_t color);
 extern void line(jd9853_JD9853_obj_t *self, int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t color);
-
-// New function declarations (for use by other functions)
 extern uint16_t color565(uint8_t r, uint8_t g, uint8_t b);
 
 #ifdef  __cplusplus
