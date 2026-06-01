@@ -73,8 +73,8 @@
     }                                       \
 }
 
-// ========== MEJORA: buffer de transferencia más grande ==========
-#define FILL_BUFFER_PIXELS 1024   // antes 128, aumenta velocidad
+// ========== BUFFER DE TRANSFERENCIA (para ráfagas) ==========
+#define FILL_BUFFER_PIXELS 1024   // 1024 píxeles -> 3072 bytes
 
 // ========== Tabla de rotaciones fija para 172x320 ==========
 jd9853_rotation_t ORIENTATIONS_172x320[4] = {
@@ -93,21 +93,55 @@ static void write_spi(mp_obj_base_t *spi_obj, const uint8_t *buf, int len) {
     spi_p->transfer(spi_obj, len, buf, NULL);
 }
 
+// ========== Conversión RGB565 (16 bits) a RGB666 (3 bytes) ==========
+static inline void rgb565_to_rgb666(uint8_t *dst, uint16_t color) {
+    uint8_t r = (color >> 8) & 0xF8;   // R de 5 bits -> 8 bits
+    uint8_t g = (color >> 3) & 0xFC;   // G de 6 bits -> 8 bits
+    uint8_t b = (color << 3) & 0xF8;   // B de 5 bits -> 8 bits
+    dst[0] = r >> 2;    // convertir a 6 bits
+    dst[1] = g >> 2;
+    dst[2] = b >> 2;
+}
+
+// ========== Conversión RGB888 (3 bytes) a RGB666 (3 bytes) ==========
 static inline void rgb888_to_rgb666(uint8_t *dst, const uint8_t *src, uint32_t pixel_count) {
     for (uint32_t i = 0; i < pixel_count; i++) {
-        *dst++ = src[0] >> 2;   // R (6 bits)
-        *dst++ = src[1] >> 2;   // G
-        *dst++ = src[2] >> 2;   // B
+        dst[0] = src[0] >> 2;
+        dst[1] = src[1] >> 2;
+        dst[2] = src[2] >> 2;
         src += 3;
+        dst += 3;
     }
 }
 
+// ========== Rellenar buffer de color sólido en formato RGB666 ==========
+static void fill_color_buffer(mp_obj_base_t *spi_obj, uint16_t color, int length) {
+    int chunks = length / FILL_BUFFER_PIXELS;
+    int rest = length % FILL_BUFFER_PIXELS;
+    uint8_t buffer[FILL_BUFFER_PIXELS * 3];
+    uint8_t rgb666[3];
+    rgb565_to_rgb666(rgb666, color);
+    for (int i = 0; i < FILL_BUFFER_PIXELS; i++) {
+        memcpy(buffer + i * 3, rgb666, 3);
+    }
+    if (chunks) {
+        for (int j = 0; j < chunks; j++) {
+            write_spi(spi_obj, buffer, FILL_BUFFER_PIXELS * 3);
+        }
+    }
+    if (rest) {
+        write_spi(spi_obj, buffer, rest * 3);
+    }
+}
+
+// ========== Impresión del objeto ==========
 static void jd9853_JD9853_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
     (void)kind;
     jd9853_JD9853_obj_t *self = MP_OBJ_TO_PTR(self_in);
     mp_printf(print, "<JD9853 width=%u, height=%u, spi=%p>", self->width, self->height, self->spi_obj);
 }
 
+// ========== Envío de comandos ==========
 static void write_cmd(jd9853_JD9853_obj_t *self, uint8_t cmd, const uint8_t *data, int len) {
     CS_LOW()
     if (cmd) {
@@ -121,6 +155,7 @@ static void write_cmd(jd9853_JD9853_obj_t *self, uint8_t cmd, const uint8_t *dat
     CS_HIGH()
 }
 
+// ========== Establecer ventana de escritura ==========
 static void set_window(jd9853_JD9853_obj_t *self, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
     if (x0 > x1 || x1 >= self->width) return;
     if (y0 > y1 || y1 >= self->height) return;
@@ -152,30 +187,7 @@ static mp_obj_t jd9853_JD9853_set_window(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_set_window_obj, 5, 5, jd9853_JD9853_set_window);
 
-// ========== fill_color_buffer optimizado con buffer grande ==========
-static void fill_color_buffer(mp_obj_base_t *spi_obj, uint16_t color, int length) {
-    int chunks = length / FILL_BUFFER_PIXELS;
-    int rest = length % FILL_BUFFER_PIXELS;
-    uint16_t color_swapped = _swap_bytes(color);
-    uint16_t buffer[FILL_BUFFER_PIXELS];
-
-    for (int i = 0; i < FILL_BUFFER_PIXELS; i++) buffer[i] = color_swapped;
-
-    if (chunks) {
-        for (int j = 0; j < chunks; j++) {
-            write_spi(spi_obj, (uint8_t *)buffer, FILL_BUFFER_PIXELS * 2);
-        }
-    }
-    if (rest) {
-        write_spi(spi_obj, (uint8_t *)buffer, rest * 2);
-    }
-}
-
-int mod(int x, int m) {
-    int r = x % m;
-    return (r < 0) ? r + m : r;
-}
-
+// ========== Dibujo de píxel individual ==========
 void draw_pixel(jd9853_JD9853_obj_t *self, int16_t x, int16_t y, uint16_t color) {
     if ((self->options & OPTIONS_WRAP)) {
         if ((self->options & OPTIONS_WRAP_H) && ((x >= self->width) || (x < 0)))
@@ -185,16 +197,17 @@ void draw_pixel(jd9853_JD9853_obj_t *self, int16_t x, int16_t y, uint16_t color)
     }
 
     if ((x < self->width) && (y < self->height) && (x >= 0) && (y >= 0)) {
-        uint8_t hi = color >> 8, lo = color & 0xff;
+        uint8_t rgb666[3];
+        rgb565_to_rgb666(rgb666, color);
         set_window(self, x, y, x, y);
         DC_HIGH();
         CS_LOW();
-        write_spi(self->spi_obj, &hi, 1);
-        write_spi(self->spi_obj, &lo, 1);
+        write_spi(self->spi_obj, rgb666, 3);
         CS_HIGH();
     }
 }
 
+// ========== Línea horizontal rápida ==========
 void fast_hline(jd9853_JD9853_obj_t *self, int16_t x, int16_t y, int16_t w, uint16_t color) {
     if ((self->options & OPTIONS_WRAP) == 0) {
         if (y >= 0 && self->width > x && self->height > y) {
@@ -214,6 +227,7 @@ void fast_hline(jd9853_JD9853_obj_t *self, int16_t x, int16_t y, int16_t w, uint
     }
 }
 
+// ========== Línea vertical rápida ==========
 static void fast_vline(jd9853_JD9853_obj_t *self, int16_t x, int16_t y, int16_t h, uint16_t color) {
     if ((self->options & OPTIONS_WRAP) == 0) {
         if (x >= 0 && self->width > x && self->height > y) {
@@ -233,6 +247,7 @@ static void fast_vline(jd9853_JD9853_obj_t *self, int16_t x, int16_t y, int16_t 
     }
 }
 
+// ========== Reset duro y blando ==========
 static mp_obj_t jd9853_JD9853_hard_reset(mp_obj_t self_in) {
     jd9853_JD9853_obj_t *self = MP_OBJ_TO_PTR(self_in);
     CS_LOW();
@@ -276,6 +291,7 @@ static mp_obj_t jd9853_JD9853_inversion_mode(mp_obj_t self_in, mp_obj_t value) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(jd9853_JD9853_inversion_mode_obj, jd9853_JD9853_inversion_mode);
 
+// ========== fill_rect ==========
 static mp_obj_t jd9853_JD9853_fill_rect(size_t n_args, const mp_obj_t *args) {
     jd9853_JD9853_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     mp_int_t x = mp_obj_get_int(args[1]);
@@ -392,8 +408,9 @@ static mp_obj_t jd9853_JD9853_blit_buffer(size_t n_args, const mp_obj_t *args) {
     DC_HIGH();
     CS_LOW();
 
-    const int buf_size = 256;
-    int limit = MIN(buf_info.len, w * h * 2);
+    // Asumimos que el buffer ya está en RGB666 (3 bytes por píxel)
+    const int buf_size = 256; // en bytes
+    int limit = MIN(buf_info.len, w * h * 3);
     int chunks = limit / buf_size;
     int rest = limit % buf_size;
     int i = 0;
@@ -406,7 +423,7 @@ static mp_obj_t jd9853_JD9853_blit_buffer(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_blit_buffer_obj, 6, 6, jd9853_JD9853_blit_buffer);
 
-// ========== FUNCIONES DE TEXTO Y DIBUJO ==========
+// ========== DIBUJO DE TEXTO VECTORIAL (Hershey) ==========
 static mp_obj_t jd9853_JD9853_draw(size_t n_args, const mp_obj_t *args) {
     jd9853_JD9853_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     char single_char_s[] = {0, 0};
@@ -543,7 +560,7 @@ static mp_obj_t jd9853_JD9853_draw_len(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_draw_len_obj, 3, 4, jd9853_JD9853_draw_len);
 
-// ========== BITMAP y WRITE ==========
+// ========== BITMAP y WRITE (con buffers de 3 bytes) ==========
 static uint32_t bs_bit = 0;
 uint8_t *bitmap_data = NULL;
 
@@ -602,8 +619,8 @@ static mp_obj_t jd9853_JD9853_write(size_t n_args, const mp_obj_t *args) {
 
     mp_int_t x = mp_obj_get_int(args[3]);
     mp_int_t y = mp_obj_get_int(args[4]);
-    mp_int_t fg_color = (n_args > 5) ? _swap_bytes(mp_obj_get_int(args[5])) : _swap_bytes(WHITE);
-    mp_int_t bg_color = (n_args > 6) ? _swap_bytes(mp_obj_get_int(args[6])) : _swap_bytes(BLACK);
+    mp_int_t fg_color = (n_args > 5) ? mp_obj_get_int(args[5]) : WHITE;
+    mp_int_t bg_color = (n_args > 6) ? mp_obj_get_int(args[6]) : BLACK;
 
     mp_obj_t *tuple_data = NULL;
     size_t tuple_len = 0;
@@ -645,11 +662,12 @@ static mp_obj_t jd9853_JD9853_write(size_t n_args, const mp_obj_t *args) {
 
     // Usar buffer interno estático si no se proporcionó uno externo
     if (self->buffer_size == 0) {
-        self->i2c_buffer = self->static_buffer;
+        self->i2c_buffer = (uint16_t*)self->static_buffer;  // buffer de bytes
     }
 
     if (fill && background_data && self->i2c_buffer) {
-        memcpy(self->i2c_buffer, background_data, background_width * background_height * 2);
+        // Copiar fondo (se asume que está en RGB666, 3 bytes por píxel)
+        memcpy(self->i2c_buffer, background_data, background_width * background_height * 3);
     }
 
     uint16_t print_width = 0;
@@ -676,28 +694,35 @@ static mp_obj_t jd9853_JD9853_write(size_t n_args, const mp_obj_t *args) {
                 }
                 uint16_t buffer_width = (fill) ? max_width : width;
                 uint16_t color = 0;
+                uint8_t *buf_ptr = (uint8_t*)self->i2c_buffer;
                 for (uint16_t yy = 0; yy < height; yy++) {
                     for (uint16_t xx = 0; xx < width; xx++) {
                         if (background_data && (xx <= background_width && yy <= background_height)) {
                             if (get_color(bpp) == bg_color) {
-                                color = background_data[(yy * background_width + xx)];
+                                // Copiar del fondo (3 bytes)
+                                memcpy(buf_ptr + (yy * buffer_width + xx) * 3,
+                                       (uint8_t*)background_data + (yy * background_width + xx) * 3, 3);
                             } else {
-                                color = fg_color;
+                                uint8_t rgb666[3];
+                                rgb565_to_rgb666(rgb666, fg_color);
+                                memcpy(buf_ptr + (yy * buffer_width + xx) * 3, rgb666, 3);
                             }
                         } else {
-                            color = get_color(bpp) ? fg_color : bg_color;
+                            uint8_t rgb666[3];
+                            uint16_t col = get_color(bpp) ? fg_color : bg_color;
+                            rgb565_to_rgb666(rgb666, col);
+                            memcpy(buf_ptr + (yy * buffer_width + xx) * 3, rgb666, 3);
                         }
-                        ((uint16_t*)self->i2c_buffer)[yy * buffer_width + xx] = color;
                     }
                 }
-                uint32_t data_size = buffer_width * height * 2;
+                uint32_t data_size = buffer_width * height * 3;
                 uint16_t x2 = x + buffer_width - 1;
                 uint16_t y2 = y + height - 1;
                 if (x2 < self->width) {
                     set_window(self, x, y, x2, y2);
                     DC_HIGH();
                     CS_LOW();
-                    write_spi(self->spi_obj, (uint8_t *)self->i2c_buffer, data_size);
+                    write_spi(self->spi_obj, (uint8_t*)self->i2c_buffer, data_size);
                     CS_HIGH();
                     print_width += width;
                 }
@@ -711,7 +736,7 @@ static mp_obj_t jd9853_JD9853_write(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_write_obj, 5, 9, jd9853_JD9853_write);
 
-// ========== BITMAP ==========
+// ========== BITMAP (imágenes indexadas) ==========
 static mp_obj_t jd9853_JD9853_bitmap(size_t n_args, const mp_obj_t *args) {
     jd9853_JD9853_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     mp_obj_module_t *bitmap = MP_OBJ_TO_PTR(args[1]);
@@ -737,9 +762,9 @@ static mp_obj_t jd9853_JD9853_bitmap(size_t n_args, const mp_obj_t *args) {
     mp_get_buffer_raise(bitmap_data_buff, &bufinfo, MP_BUFFER_READ);
     bitmap_data = bufinfo.buf;
 
-    size_t buf_size = width * height * 2;
+    size_t buf_size = width * height * 3;   // 3 bytes por píxel
     if (self->buffer_size == 0) {
-        self->i2c_buffer = self->static_buffer;
+        self->i2c_buffer = (uint16_t*)self->static_buffer;
     }
 
     size_t ofs = 0;
@@ -752,9 +777,14 @@ static mp_obj_t jd9853_JD9853_bitmap(size_t n_args, const mp_obj_t *args) {
         }
     }
 
+    uint8_t *buf_ptr = (uint8_t*)self->i2c_buffer;
     for (int yy = 0; yy < height; yy++) {
         for (int xx = 0; xx < width; xx++) {
-            ((uint16_t*)self->i2c_buffer)[ofs++] = mp_obj_get_int(palette[get_color(bpp)]);
+            uint16_t color = mp_obj_get_int(palette[get_color(bpp)]);
+            uint8_t rgb666[3];
+            rgb565_to_rgb666(rgb666, color);
+            memcpy(buf_ptr + ofs, rgb666, 3);
+            ofs += 3;
         }
     }
 
@@ -763,14 +793,14 @@ static mp_obj_t jd9853_JD9853_bitmap(size_t n_args, const mp_obj_t *args) {
         set_window(self, x, y, x1, y + height - 1);
         DC_HIGH();
         CS_LOW();
-        write_spi(self->spi_obj, (uint8_t *)self->i2c_buffer, buf_size);
+        write_spi(self->spi_obj, (uint8_t*)self->i2c_buffer, buf_size);
         CS_HIGH();
     }
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_bitmap_obj, 4, 5, jd9853_JD9853_bitmap);
 
-// ========== TEXTO (FONTS MONO) ==========
+// ========== TEXTO (fuentes monocromas) ==========
 static mp_obj_t jd9853_JD9853_text(size_t n_args, const mp_obj_t *args) {
     jd9853_JD9853_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     uint8_t single_char_s;
@@ -812,14 +842,14 @@ static mp_obj_t jd9853_JD9853_text(size_t n_args, const mp_obj_t *args) {
     mp_get_buffer_raise(font_data_buff, &bufinfo, MP_BUFFER_READ);
     const uint8_t *font_data = bufinfo.buf;
 
-    mp_int_t fg_color = (n_args > 5) ? _swap_bytes(mp_obj_get_int(args[5])) : _swap_bytes(WHITE);
-    mp_int_t bg_color = (n_args > 6) ? _swap_bytes(mp_obj_get_int(args[6])) : _swap_bytes(BLACK);
+    mp_int_t fg_color = (n_args > 5) ? mp_obj_get_int(args[5]) : WHITE;
+    mp_int_t bg_color = (n_args > 6) ? mp_obj_get_int(args[6]) : BLACK;
 
     uint8_t wide = width / 8;
-    size_t buf_size = width * height * 2;
+    size_t buf_size = width * height * 3;   // 3 bytes por píxel
 
     if (self->buffer_size == 0) {
-        self->i2c_buffer = self->static_buffer;
+        self->i2c_buffer = (uint16_t*)self->static_buffer;
     }
 
     uint8_t chr;
@@ -828,16 +858,16 @@ static mp_obj_t jd9853_JD9853_text(size_t n_args, const mp_obj_t *args) {
         if (chr >= first && chr <= last) {
             uint16_t buf_idx = 0;
             uint16_t chr_idx = (chr - first) * (height * wide);
+            uint8_t *buf_ptr = (uint8_t*)self->i2c_buffer;
             for (uint8_t line = 0; line < height; line++) {
                 for (uint8_t line_byte = 0; line_byte < wide; line_byte++) {
                     uint8_t chr_data = font_data[chr_idx];
                     for (uint8_t bit = 8; bit; bit--) {
-                        if (chr_data >> (bit - 1) & 1) {
-                            ((uint16_t*)self->i2c_buffer)[buf_idx] = fg_color;
-                        } else {
-                            ((uint16_t*)self->i2c_buffer)[buf_idx] = bg_color;
-                        }
-                        buf_idx++;
+                        uint16_t col = (chr_data >> (bit - 1)) & 1 ? fg_color : bg_color;
+                        uint8_t rgb666[3];
+                        rgb565_to_rgb666(rgb666, col);
+                        memcpy(buf_ptr + buf_idx, rgb666, 3);
+                        buf_idx += 3;
                     }
                     chr_idx++;
                 }
@@ -847,7 +877,7 @@ static mp_obj_t jd9853_JD9853_text(size_t n_args, const mp_obj_t *args) {
                 set_window(self, x0, y0, x1, y0 + height - 1);
                 DC_HIGH();
                 CS_LOW();
-                write_spi(self->spi_obj, (uint8_t *)self->i2c_buffer, buf_size);
+                write_spi(self->spi_obj, (uint8_t*)self->i2c_buffer, buf_size);
                 CS_HIGH();
             }
             x0 += width;
@@ -1060,7 +1090,7 @@ static mp_obj_t jd9853_JD9853_off(mp_obj_t self_in) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(jd9853_JD9853_off_obj, jd9853_JD9853_off);
 
-// ========== OTRAS PRIMITIVAS DE DIBUJO ==========
+// ========== OTRAS PRIMITIVAS DE DIBUJO (ya usan las funciones adaptadas) ==========
 static mp_obj_t jd9853_JD9853_hline(size_t n_args, const mp_obj_t *args) {
     jd9853_JD9853_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     mp_int_t x = mp_obj_get_int(args[1]);
@@ -1206,6 +1236,8 @@ static MP_DEFINE_CONST_FUN_OBJ_3(jd9853_color565_obj, jd9853_color565);
 static void map_bitarray_to_rgb565(uint8_t const *bitarray, uint8_t *buffer, int length, int width,
     uint16_t color, uint16_t bg_color) {
     int row_pos = 0;
+    // Esta función convierte a RGB565 (2 bytes), pero no se usa directamente para enviar a la pantalla.
+    // Se mantiene por compatibilidad con la interfaz Python.
     for (int i = 0; i < length; i++) {
         uint8_t byte = bitarray[i];
         for (int bi = 7; bi >= 0; bi--) {
@@ -1230,7 +1262,7 @@ static mp_obj_t jd9853_map_bitarray_to_rgb565(size_t n_args, const mp_obj_t *arg
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_map_bitarray_to_rgb565_obj, 3, 6, jd9853_map_bitarray_to_rgb565);
 
-// ========== PROCESAMIENTO DE JPG (código original) ==========
+// ========== PROCESAMIENTO DE JPG (conversión a RGB666) ==========
 #define JPG_MODE_FAST 0
 #define JPG_MODE_SLOW 1
 
@@ -1261,34 +1293,27 @@ static int out_fast(JDEC *jd, void *bitmap, JRECT *rect) {
     IODEV *dev = (IODEV *)jd->device;
     jd9853_JD9853_obj_t *self = dev->self;
     uint8_t *src = (uint8_t*)bitmap;   // RGB888 de entrada
-    // Calcular offset en buffer destino (dev->fbuf) en base a bytes por píxel (3)
     uint8_t *dst = dev->fbuf + 3 * (rect->top * dev->wfbuf + rect->left);
-    int bws = 3 * (rect->right - rect->left + 1);   // bytes por línea de la fuente (RGB888)
-    int bwd = 3 * dev->wfbuf;                       // bytes por línea del buffer destino (RGB666)
+    int bws = 3 * (rect->right - rect->left + 1);
+    int bwd = 3 * dev->wfbuf;
     for (unsigned int y = rect->top; y <= rect->bottom; y++) {
-        // Convertir la línea completa de RGB888 a RGB666 y copiar
         rgb888_to_rgb666(dst, src, (rect->right - rect->left + 1));
         src += bws;
         dst += bwd;
     }
     return 1;
 }
-
 static int out_slow(JDEC *jd, void *bitmap, JRECT *rect) {
     IODEV *dev = (IODEV *)jd->device;
     jd9853_JD9853_obj_t *self = dev->self;
     uint8_t *src = (uint8_t*)bitmap;
-    // En modo lento, dev->fbuf es un buffer temporal para una sola fila (o bloque) convertido
-    // Pero en la implementación original, se copia toda la imagen dentro del buffer y luego se envía.
-    // Aquí también hay que convertir.
-    // Asumimos que dev->fbuf tiene suficiente espacio para toda la porción (en RGB666)
     uint8_t *dst = dev->fbuf;
     int width_pixels = rect->right - rect->left + 1;
     int height_pixels = rect->bottom - rect->top + 1;
-    int wx3 = width_pixels * 3;   // bytes por línea en RGB666
+    int wx3 = width_pixels * 3;
     for (unsigned int y = 0; y < height_pixels; y++) {
         rgb888_to_rgb666(dst, src, width_pixels);
-        src += wx3;   // la fuente ya está en RGB888, misma cantidad de bytes (3 por píxel)
+        src += wx3;
         dst += wx3;
     }
     set_window(self, rect->left + jd->x_offs, rect->top + jd->y_offs,
@@ -1325,17 +1350,17 @@ static mp_obj_t jd9853_JD9853_jpg(size_t n_args, const mp_obj_t *args) {
             size_t bufsize;
             int (*outfunc)(JDEC*,void*,JRECT*);
             if (mode == JPG_MODE_FAST) {
-                bufsize = 3 * jdec.width * jdec.height;   // Cambiado: 3 bytes por píxel (RGB666)
+                bufsize = 3 * jdec.width * jdec.height;
                 outfunc = out_fast;
             } else {
-                bufsize = 3 * jdec.msx * 8 * jdec.msy * 8; // Cambiado: 3 bytes por píxel
+                bufsize = 3 * jdec.msx * 8 * jdec.msy * 8;
                 outfunc = out_slow;
                 jdec.x_offs = x; jdec.y_offs = y;
             }
             if (self->buffer_size && bufsize > self->buffer_size)
                 mp_raise_msg_varg(&mp_type_OSError, MP_ERROR_TEXT("buffer too small. %ld bytes required."), (long)bufsize);
             if (self->buffer_size == 0)
-                self->i2c_buffer = m_malloc(bufsize);
+                self->i2c_buffer = (uint16_t*)m_malloc(bufsize);
             if (!self->i2c_buffer)
                 mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("out of memory"));
             devid.fbuf = (uint8_t *)self->i2c_buffer;
@@ -1373,10 +1398,12 @@ static int out_crop(JDEC *jd, void *bitmap, JRECT *rect) {
         uint16_t bottom = MIN(dev->bottom, rect->bottom);
         uint16_t dev_width = dev->right - dev->left + 1;
         uint16_t rect_width = rect->right - rect->left + 1;
-        uint16_t width = (right - left + 1) * 2;
+        uint8_t *src = (uint8_t*)bitmap;
+        uint8_t *dst = dev->fbuf;
         for (uint16_t row = top; row <= bottom; row++) {
-            memcpy((uint16_t *)dev->fbuf + ((row - dev->top) * dev_width) + left - dev->left,
-                   (uint16_t *)bitmap + ((row - rect->top) * rect_width) + left - rect->left, width);
+            rgb888_to_rgb666(dst + ((row - dev->top) * dev_width * 3) + (left - dev->left) * 3,
+                             src + ((row - rect->top) * rect_width * 3) + (left - rect->left) * 3,
+                             right - left + 1);
         }
     }
     return 1;
@@ -1410,8 +1437,8 @@ static mp_obj_t jd9853_JD9853_jpg_decode(size_t n_args, const mp_obj_t *args) {
             if (res == JDR_OK) {
                 if (n_args < 6) { x = 0; y = 0; width = jdec.width; height = jdec.height; }
                 devid.left = x; devid.top = y; devid.right = x + width - 1; devid.bottom = y + height - 1;
-                size_t bufsize = 2 * width * height;
-                self->i2c_buffer = m_malloc(bufsize);
+                size_t bufsize = 3 * width * height;
+                self->i2c_buffer = (uint16_t*)m_malloc(bufsize);
                 if (!self->i2c_buffer) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("out of memory"));
                 memset(self->i2c_buffer, 0, bufsize);
                 devid.fbuf = (uint8_t *)self->i2c_buffer;
@@ -1434,21 +1461,21 @@ static mp_obj_t jd9853_JD9853_jpg_decode(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_jpg_decode_obj, 2, 6, jd9853_JD9853_jpg_decode);
 
-// ========== PROCESAMIENTO DE PNG (código original) ==========
+// ========== PROCESAMIENTO DE PNG (conversión a RGB565 y luego a RGB666) ==========
 typedef struct _PNG_USER_DATA {
     jd9853_JD9853_obj_t *self;
     int ofs_x, ofs_y;
     uint16_t pixels, row, first, last;
     bool has_transparency;
-    uint16_t *buffer;
+    uint8_t *buffer;   // ahora buffer de bytes (RGB666)
 } PNG_USER_DATA;
 
 void png_flush(jd9853_JD9853_obj_t *self, PNG_USER_DATA *user_data) {
     set_window(self, user_data->first, user_data->row, user_data->last, user_data->row);
     DC_HIGH(); CS_LOW();
-    write_spi(self->spi_obj, (uint8_t *)self->i2c_buffer, user_data->pixels * 2);
+    write_spi(self->spi_obj, user_data->buffer, user_data->pixels * 3);
     CS_HIGH();
-    user_data->buffer = self->i2c_buffer;
+    user_data->buffer = (uint8_t*)self->i2c_buffer;
     user_data->pixels = 0;
 }
 void png_new_row(PNG_USER_DATA *user_data, uint16_t row, uint16_t col) {
@@ -1463,7 +1490,7 @@ void pngle_on_draw(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t 
     int col = x + user_data->ofs_x;
     if (col < 0 || row < 0 || col >= self->width || row > self->height) return;
     pngle_ihdr_t *ihdr = pngle_get_ihdr(pngle);
-    size_t min_buffer_size = ihdr->width * 2;
+    size_t min_buffer_size = ihdr->width * 3;
     if (user_data->buffer == NULL) {
         if (self->buffer_size == 0) {
             user_data->buffer = m_malloc(min_buffer_size);
@@ -1471,9 +1498,9 @@ void pngle_on_draw(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t 
         } else {
             if (self->buffer_size < min_buffer_size)
                 mp_raise_msg_varg(&mp_type_OSError, MP_ERROR_TEXT("buffer too small. %zu bytes required."), min_buffer_size);
-            user_data->buffer = self->i2c_buffer;
+            user_data->buffer = (uint8_t*)self->i2c_buffer;
         }
-        self->i2c_buffer = user_data->buffer;
+        self->i2c_buffer = (uint16_t*)user_data->buffer;
         png_new_row(user_data, row, col);
     }
     if (user_data->pixels > 0 && (row != user_data->row || (user_data->has_transparency && rgba[3] == 0))) {
@@ -1484,7 +1511,10 @@ void pngle_on_draw(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint32_t 
         png_new_row(user_data, row, col);
         return;
     }
-    *user_data->buffer++ = _swap_bytes(color565(rgba[0], rgba[1], rgba[2]));
+    uint16_t color16 = color565(rgba[0], rgba[1], rgba[2]);
+    uint8_t rgb666[3];
+    rgb565_to_rgb666(rgb666, color16);
+    memcpy(user_data->buffer + user_data->pixels * 3, rgb666, 3);
     user_data->pixels++;
     user_data->last = col;
 }
@@ -1689,13 +1719,13 @@ static mp_obj_t jd9853_JD9853_bounding(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(jd9853_JD9853_bounding_obj, 1, 3, jd9853_JD9853_bounding);
 
-// ========== NUEVAS FUNCIONES MEJORADAS (gradient, triangle, etc.) ==========
+// ========== NUEVAS FUNCIONES (gradient, icon, etc.) ya adaptadas ==========
 static mp_obj_t jd9853_JD9853_gradient_fill(size_t n_args, const mp_obj_t *args) {
     jd9853_JD9853_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     mp_int_t x = mp_obj_get_int(args[1]), y = mp_obj_get_int(args[2]);
     mp_int_t w = mp_obj_get_int(args[3]), h = mp_obj_get_int(args[4]);
     mp_int_t color1 = mp_obj_get_int(args[5]), color2 = mp_obj_get_int(args[6]);
-    mp_int_t direction = mp_obj_get_int(args[7]); // 0=horizontal, 1=vertical
+    mp_int_t direction = mp_obj_get_int(args[7]);
     int16_t x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
     int16_t x1 = x + w - 1, y1 = y + h - 1;
     if (x1 >= self->width) x1 = self->width - 1;
@@ -1928,7 +1958,7 @@ const mp_obj_type_t jd9853_JD9853_type = {
 };
 #endif
 
-// ========== FUNCIÓN make_new ==========
+// ========== make_new ==========
 mp_obj_t jd9853_JD9853_make_new(const mp_obj_type_t *type,
     size_t n_args, size_t n_kw, const mp_obj_t *all_args) {
     enum {
@@ -1992,9 +2022,9 @@ mp_obj_t jd9853_JD9853_make_new(const mp_obj_type_t *type,
     self->buffer_size = args[ARG_buffer_size].u_int;
 
     if (self->buffer_size) {
-        self->i2c_buffer = m_malloc(self->buffer_size);
+        self->i2c_buffer = (uint16_t*)m_malloc(self->buffer_size);
     } else {
-        self->i2c_buffer = self->static_buffer;   // buffer interno
+        self->i2c_buffer = (uint16_t*)self->static_buffer;   // buffer interno de bytes
     }
 
     if (args[ARG_dc].u_obj == MP_OBJ_NULL) mp_raise_ValueError(MP_ERROR_TEXT("must specify dc pin"));
